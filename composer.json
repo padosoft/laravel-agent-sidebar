@@ -1,0 +1,34 @@
+{
+    "name": "padosoft/laravel-agent-sidebar",
+    "description": "Persistent, application-scoped sidebar conversations and read-only tools for Laravel AI.",
+    "type": "library",
+    "require": {
+        "php": "^8.3",
+        "laravel/framework": "^12.62 || ^13.15",
+        "laravel/ai": "^1.4.1"
+    },
+    "require-dev": {
+        "orchestra/testbench": "^10.0 || ^11.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "Padosoft\\AgentSidebar\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "Padosoft\\AgentSidebar\\Tests\\": "tests/"
+        }
+    },
+    "extra": {
+        "laravel": {
+            "providers": [
+                "Padosoft\\AgentSidebar\\AgentSidebarServiceProvider"
+            ]
+        }
+    },
+    "scripts": {
+        "test": "phpunit --exclude-group live"
+    },
+    "license": "MIT"
+}
