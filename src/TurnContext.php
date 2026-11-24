@@ -6,6 +6,7 @@ namespace Padosoft\AgentSidebar;
 
 use Closure;
 use Laravel\Ai\Messages\Message;
+use Padosoft\AgentSidebar\Memory\MemoryStore;
 use Padosoft\AgentSidebar\Models\SidebarSession;
 
 final class TurnContext
@@ -29,6 +30,7 @@ final class TurnContext
         public readonly Subject $subject,
         private readonly SourceAccess $access,
         private readonly Closure $assertCurrent,
+        private readonly bool $allowsWiki = true,
     ) {}
 
     public function check(): void
@@ -52,10 +54,18 @@ final class TurnContext
     }
 
     /** @param list<string> $ids */
-    public function collect(array $ids): void
+    public function collect(array $ids, bool $citeable = true): void
     {
         if (count($ids) > self::MAX_DEPENDENCIES || count($this->dependencies + array_fill_keys($ids, true)) > self::MAX_DEPENDENCIES) {
             throw new TurnStopped('tool_result_limit');
+        }
+
+        if (! $this->allowsWiki) {
+            foreach ($ids as $id) {
+                if (str_starts_with($id, MemoryStore::WIKI_PREFIX)) {
+                    $this->stop('access_changed');
+                }
+            }
         }
 
         $sources = $this->access->resolve($this->subject, $ids);
@@ -69,8 +79,30 @@ final class TurnContext
             }
 
             $this->dependencies[$id] = $source->revision;
-            $this->citations[$id] = $source;
+            if ($citeable) {
+                $this->citations[$id] = $source;
+            }
         }
+    }
+
+    /** Load references without exposing private memory as a link. */
+    public function includeDependencies(array $dependencies): bool
+    {
+        foreach ($dependencies as $id => $revision) {
+            if ((! $this->allowsWiki && str_starts_with($id, MemoryStore::WIKI_PREFIX))
+                || (isset($this->dependencies[$id]) && $this->dependencies[$id] !== $revision)) {
+                return false;
+            }
+        }
+
+        if (count($this->dependencies + $dependencies) > self::MAX_DEPENDENCIES
+            || $this->access->current($this->subject, $dependencies) === null) {
+            return false;
+        }
+
+        $this->dependencies += $dependencies;
+
+        return true;
     }
 
     public function startTool(): void
@@ -90,8 +122,15 @@ final class TurnContext
 
         foreach ($turns as $turn) {
             $dependencies = $turn->dependencies ?? [];
+            foreach ($dependencies as $id => $revision) {
+                if ((! $this->allowsWiki && str_starts_with($id, MemoryStore::WIKI_PREFIX))
+                    || (isset($this->dependencies[$id]) && $this->dependencies[$id] !== $revision)) {
+                    return false;
+                }
+            }
+
             if (count($this->dependencies + $dependencies) > self::MAX_DEPENDENCIES
-                || $this->access->current($this->subject, $dependencies) === null) {
+                    || $this->access->current($this->subject, $dependencies) === null) {
                 continue;
             }
 

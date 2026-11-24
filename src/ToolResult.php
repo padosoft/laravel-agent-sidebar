@@ -10,9 +10,12 @@ final readonly class ToolResult
      * List every source that contributed non-public data, including rows summarized in aggregate.
      *
      * @param  list<string>  $sourceIds
+     * @param  array<string, string>  $revisions
      */
     public function __construct(
         public string $text,
         public array $sourceIds = [],
+        public bool $citeable = true,
+        public array $revisions = [],
     ) {}
 }

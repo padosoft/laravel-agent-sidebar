@@ -11,7 +11,9 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Blade;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Queue;
 use Illuminate\Support\Facades\Route;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
 use Laravel\Ai\AiServiceProvider;
@@ -20,10 +22,19 @@ use Orchestra\Testbench\TestCase;
 use Padosoft\AgentSidebar\AgentSidebar;
 use Padosoft\AgentSidebar\AgentSidebarServiceProvider;
 use Padosoft\AgentSidebar\ApplicationHost;
+use Padosoft\AgentSidebar\AuthorizedRun;
+use Padosoft\AgentSidebar\ContextValue;
 use Padosoft\AgentSidebar\Conversations;
+use Padosoft\AgentSidebar\Memory\MemoryAgent;
+use Padosoft\AgentSidebar\Memory\MemoryWorker;
+use Padosoft\AgentSidebar\Memory\UpdateMemory;
+use Padosoft\AgentSidebar\Memory\WikiFiles;
+use Padosoft\AgentSidebar\MemoryOptions;
 use Padosoft\AgentSidebar\PageContext;
 use Padosoft\AgentSidebar\SidebarAgent;
 use Padosoft\AgentSidebar\Subject;
+use Padosoft\AgentSidebar\TurnRunner;
+use Padosoft\AgentSidebar\TurnStopped;
 use PHPUnit\Framework\Attributes\Group;
 use Throwable;
 
@@ -404,17 +415,158 @@ final class SidebarTest extends TestCase
             'ai.providers.sidebar-local' => ['driver' => 'openai-compatible', 'url' => 'http://127.0.0.1:11434/v1'],
             'agent-sidebar.provider' => 'sidebar-local',
             'agent-sidebar.model' => $model,
-            'agent-sidebar.turn_ttl' => 150,
+            'agent-sidebar.turn_ttl' => 180,
+            'agent-sidebar.inference_timeout' => 80,
             'agent-sidebar.require_tool' => true,
-            'agent-sidebar.instructions' => 'For every order question you must call read_order using the given integer order ID. Then quote the exact status and include its source ID.',
+            'agent-sidebar.instructions' => 'For every order question you must call read_order using the given integer order ID. After the tool returns, output exactly one JSON object with keys answer and source_ids. Use the exact returned status as answer and ["order:1"] as source_ids. Do not output commentary.',
         ]);
         Http::allowStrayRequests();
 
         $response = $this->send($this->payload())->assertCreated();
-        self::assertGreaterThanOrEqual(1, app(ReadOrder::class)->calls, (string) $response->json('turn.answer'));
+        self::assertGreaterThanOrEqual(1, app(ReadOrder::class)->calls, (string) $response->json('turn.error_code'));
         self::assertSame('completed', $response->json('turn.status'), (string) $response->json('turn.error_code'));
         $response->assertJsonPath('turn.sources.0.id', 'order:1');
         self::assertStringContainsString('turquoise-marigold', $response->json('turn.answer'));
+    }
+
+    public function test_fluent_context_and_model_have_explicit_precedence(): void
+    {
+        $this->signIn();
+        $input = $this->payload();
+        $access = AgentSidebar::forRequest(app('request'));
+        $access->context()->put('workflow', new ContextValue('Server context'));
+        self::assertSame('Server context', $access->context()->get('workflow')->text);
+
+        AgentSidebar::configure()->usingModel('sidebar-test', 'fluent-default')->resolveModelUsing(TestModelResolver::class)->register();
+        Http::fake([self::PROVIDER => Http::sequence()->push($this->providerAnswer('First'))->push($this->providerAnswer('Second'))]);
+        $receipt = $access->turn()->usingModel('sidebar-test', 'turn-override')
+            ->withContext('temporary', new ContextValue('Single-turn context'))
+            ->submit($input['message'], $input['client_message_id'], $input['context_token']);
+        self::assertSame(201, $receipt['status']);
+        self::assertSame('First', $receipt['data']['turn']['answer']);
+        $this->send($this->payload($receipt['data']['session_id']))->assertCreated()->assertJsonPath('turn.answer', 'Second');
+        Http::assertSent(fn (ProviderRequest $request): bool => $request['model'] === 'turn-override'
+            && str_contains($request->body(), 'Single-turn context') && str_contains($request->body(), 'Server context'));
+        Http::assertSent(fn (ProviderRequest $request): bool => $request['model'] === 'resolved-acme'
+            && ! str_contains($request->body(), 'Single-turn context') && str_contains($request->body(), 'Server context'));
+        self::assertNull($access->context()->forget('workflow')->get('workflow'));
+    }
+
+    public function test_memory_is_encrypted_and_survives_reset_but_a_stale_job_cannot_recreate_short_memory(): void
+    {
+        $this->signIn();
+        Queue::fake();
+        Storage::fake('local');
+        Storage::fake('object-storage');
+        AgentSidebar::configure()->withMemory(MemoryOptions::make()->recentTokens(30)
+            ->wikiSections(['preferences'])->automatic(TestMemoryAuthorization::class))->register();
+        $input = $this->payload();
+        $access = AgentSidebar::forRequest(app('request'));
+        $access->context()->put('workflow', new ContextValue('Page context'));
+        $access->shortTerm()->replace(new ContextValue('Old summary', ['order:1']));
+        $wiki = $access->longTerm()->section('preferences');
+        $wiki->put(new ContextValue('Question language is Italian', ['order:1']));
+        $blob = DB::table('agent_sidebar_wiki_files')->sole();
+        self::assertStringNotContainsString('Italian', Storage::disk('local')->get($blob->path));
+        config(['agent-sidebar.wiki.disk' => 'object-storage']);
+        self::assertSame('Question language is Italian', $wiki->get()->text);
+        self::assertSame(['preferences'], $access->longTerm()->sections());
+
+        SidebarAgent::fake([['answer' => 'Saved transcript answer', 'source_ids' => []]]);
+        $first = $this->send($input)->assertCreated();
+        $job = Queue::pushed(UpdateMemory::class)->sole();
+        MemoryAgent::fake([json_encode(['short_summary' => 'Unused summary', 'sections' => [
+            'preferences' => ['text' => 'Italian and formal', 'summary' => 'Italian, formal'],
+        ]])]);
+        $job->handle(app(MemoryWorker::class));
+        self::assertSame('Italian and formal', $wiki->get()->text);
+        self::assertStringContainsString('Italian, formal', $access->longTerm()->summary());
+        $this->deleteJson(self::API.'/'.$first->json('session_id'))->assertNoContent();
+        $job->handle(app(MemoryWorker::class));
+        self::assertNull($access->shortTerm()->get());
+        self::assertNull($access->context()->get('workflow'));
+        self::assertSame('Italian and formal', $wiki->get()->text);
+        $this->getJson(self::API)->assertJsonPath('turns', []);
+        app(TestHost::class)->allowSource = false;
+        self::assertNull($wiki->get());
+        self::assertSame('', $access->longTerm()->summary());
+        app(Conversations::class)->forgetScope('workspace:acme');
+        app(WikiFiles::class)->cleanup();
+        Storage::disk('local')->assertMissing($blob->path);
+        self::assertSame([], Storage::disk('object-storage')->allFiles());
+    }
+
+    public function test_headless_execution_never_reads_web_memory_and_reserves_every_step(): void
+    {
+        $this->signIn();
+        Storage::fake('local');
+        config(['agent-sidebar.memory.enabled' => true, 'agent-sidebar.memory.sections' => ['preferences']]);
+        $this->payload();
+        $access = AgentSidebar::forRequest(app('request'));
+        $access->context()->put('private', new ContextValue('Browser-only context'));
+        $access->longTerm()->section('preferences')->put(new ContextValue('Browser-only wiki'));
+        $subject = app(PageContext::class)->subject(app('request'));
+        $reserved = [];
+        Http::fake([self::PROVIDER => function () use (&$reserved) {
+            if (count($reserved) === 1) {
+                return Http::response($this->providerToolCall());
+            }
+
+            return Http::response($this->providerAnswer('Found', ['order:1']));
+        }]);
+        $run = new AuthorizedRun($subject, static function (): void {}, function (int $step) use (&$reserved): void {
+            $reserved[] = $step;
+        });
+        $result = app(TurnRunner::class)->runTask($run, 'Find order 1');
+        self::assertSame('Found', $result['text']);
+        self::assertCount(2, array_unique($reserved));
+        $this->assertDatabaseCount('agent_sidebar_turns', 0);
+        Http::assertNotSent(fn (ProviderRequest $request): bool => str_contains($request->body(), 'Browser-only') || str_contains($request->body(), 'read_wiki_section'));
+
+        $blocked = new AuthorizedRun($subject, static function (): void {}, static function (): never {
+            throw new TurnStopped('budget_exhausted');
+        });
+        try {
+            app(TurnRunner::class)->runTask($blocked, 'Budget test');
+            self::fail('An exhausted budget must block inference.');
+        } catch (TurnStopped $error) {
+            self::assertSame('budget_exhausted', $error->getMessage());
+        }
+        Http::assertSentCount(2);
+    }
+
+    public function test_an_existing_v01_conversation_is_readable_after_the_additive_migration(): void
+    {
+        $migration = require __DIR__.'/../database/migrations/2026_11_24_000001_add_memory_to_agent_sidebar.php';
+        $migration->down();
+        $this->signIn();
+        $this->payload();
+        $subject = app(PageContext::class)->subject(app('request'));
+        $conversations = app(Conversations::class);
+        [$session, $turn] = $conversations->reserve($subject, null, (string) Str::uuid(), 'Existing question');
+        $conversations->complete($turn, 'Existing answer', [], []);
+
+        $migration->up();
+        $this->getJson(self::API)->assertOk()->assertJsonPath('session_id', $session->public_id)
+            ->assertJsonPath('turns.0.answer', 'Existing answer');
+    }
+
+    public function test_failed_wiki_write_preserves_the_previous_revision(): void
+    {
+        $this->signIn();
+        $this->payload();
+        Storage::fake('local');
+        $wiki = AgentSidebar::forRequest(app('request'))->longTerm()->section('preferences');
+        $wiki->put(new ContextValue('Previous revision'));
+        config(['agent-sidebar.wiki.disk' => 'unconfigured-private-disk']);
+        try {
+            $wiki->put(new ContextValue('Next revision'));
+            self::fail('A missing disk must fail the new write.');
+        } catch (\InvalidArgumentException $error) {
+            self::assertStringContainsString('unconfigured-private-disk', $error->getMessage());
+        }
+        self::assertSame('Previous revision', $wiki->get()->text);
+        $this->assertDatabaseHas('agent_sidebar_wiki_files', ['status' => 'delete', 'disk' => 'unconfigured-private-disk']);
     }
 
     private function signIn(int|string $id = 1): void

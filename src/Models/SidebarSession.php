@@ -13,6 +13,11 @@ final class SidebarSession extends Model
 
     protected $guarded = [];
 
+    protected function casts(): array
+    {
+        return ['memory_permit' => 'encrypted:array', 'short_rebuild' => 'boolean'];
+    }
+
     public function turns(): HasMany
     {
         return $this->hasMany(SidebarTurn::class, 'session_id');

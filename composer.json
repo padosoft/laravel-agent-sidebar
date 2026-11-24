@@ -10,6 +10,10 @@
     "require-dev": {
         "orchestra/testbench": "^10.0 || ^11.0"
     },
+    "suggest": {
+        "laravel/mcp": "Adds explicitly registered read-only external MCP tools.",
+        "pact-protocol/laravel": "Adds incoming PACT Core 0.2 agent chat."
+    },
     "autoload": {
         "psr-4": {
             "Padosoft\\AgentSidebar\\": "src/"

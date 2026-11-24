@@ -7,7 +7,7 @@ import { SidebarClient, type SidebarState } from './sidebar-client';
 
 type Assistant = { token: string; label: string; sessionUrl: string; identity: string };
 
-export function TixoraSidebar({ assistant }: { assistant: Assistant | null }) {
+export function WorkspaceSidebar({ assistant }: { assistant: Assistant | null }) {
     return assistant && <AssistantPane key={assistant.identity} assistant={assistant} />;
 }
 
@@ -67,7 +67,7 @@ function AssistantPane({ assistant }: { assistant: Assistant }) {
         <>
             <aside className="sticky top-2 hidden max-h-[calc(100dvh-1rem)] w-92 shrink-0 flex-col border-l bg-card p-4 xl:flex"
                 aria-label="Assistente">
-                <h2 className="mb-3 font-editorial text-xl">Assistente</h2>
+                <h2 className="mb-3 text-xl">Assistente</h2>
                 {renderBody('desktop')}
             </aside>
             <div className="xl:hidden">

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Padosoft\AgentSidebar;
 
 use Padosoft\AgentSidebar\Contracts\Host;
+use Padosoft\AgentSidebar\Memory\MemoryStore;
 use Padosoft\AgentSidebar\Models\SidebarTurn;
 
 final readonly class SourceAccess
@@ -23,7 +24,21 @@ final readonly class SourceAccess
 
         $allowed = array_fill_keys($ids, true);
         $sources = [];
-        foreach ($this->host->sources($subject, array_keys($allowed)) as $source) {
+        foreach (array_keys($allowed) as $id) {
+            if (! str_starts_with($id, MemoryStore::WIKI_PREFIX)) {
+                continue;
+            }
+
+            unset($allowed[$id]);
+            $key = substr($id, strlen(MemoryStore::WIKI_PREFIX));
+            $entry = in_array($key, config('agent-sidebar.memory.sections', []), true)
+                ? app(MemoryStore::class)->get($subject, 'wiki', $key)
+                : null;
+            if ($entry !== null) {
+                $sources[$id] = new Source($id, $entry->key, '/', $entry->revision);
+            }
+        }
+        foreach ($allowed === [] ? [] : $this->host->sources($subject, array_keys($allowed)) as $source) {
             if (isset($allowed[$source->id])) {
                 $sources[$source->id] = $source;
             }

@@ -9,6 +9,7 @@ use Illuminate\Contracts\Auth\Authenticatable;
 use Illuminate\Database\Eloquent\Builder;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Str;
+use Padosoft\AgentSidebar\Models\MemoryEntry;
 use Padosoft\AgentSidebar\Models\SidebarSession;
 use Padosoft\AgentSidebar\Models\SidebarTurn;
 
@@ -17,6 +18,24 @@ final class Conversations
     public function current(Subject $subject): ?SidebarSession
     {
         return $this->ownedBy($subject)->first();
+    }
+
+    public function ensure(Subject $subject): SidebarSession
+    {
+        $this->createIfMissing($subject, (string) Str::uuid());
+
+        return $this->ownedBy($subject)->firstOrFail();
+    }
+
+    private function createIfMissing(Subject $subject, string $publicId): void
+    {
+        SidebarSession::query()->insertOrIgnore([
+            'public_id' => $publicId,
+            'actor_key' => $subject->actorKey,
+            'scope_key' => $subject->scopeKey,
+            'created_at' => now(),
+            'updated_at' => now(),
+        ]);
     }
 
     /**
@@ -28,13 +47,7 @@ final class Conversations
         return DB::transaction(function () use ($subject, $publicId, $clientId, $message, $beforeCreate): array {
             $newSessionId = (string) Str::uuid();
             if ($publicId === null) {
-                SidebarSession::query()->insertOrIgnore([
-                    'public_id' => $newSessionId,
-                    'actor_key' => $subject->actorKey,
-                    'scope_key' => $subject->scopeKey,
-                    'created_at' => now(),
-                    'updated_at' => now(),
-                ]);
+                $this->createIfMissing($subject, $newSessionId);
             }
 
             // Acquire the database write lock before reading competing turns, also on SQLite.
@@ -58,7 +71,8 @@ final class Conversations
                 $this->conflict('turn_in_progress');
             }
 
-            if ($publicId === null && $session->public_id !== $newSessionId) {
+            if ($publicId === null && $session->public_id !== $newSessionId
+                && ($session->generation !== 0 || $session->turns()->exists())) {
                 $this->conflict('session_changed');
             }
 
@@ -89,7 +103,7 @@ final class Conversations
      * @param  array<string, string>  $dependencies
      * @param  list<string>  $citations
      */
-    public function complete(SidebarTurn $turn, string $answer, array $dependencies, array $citations): void
+    public function complete(SidebarTurn $turn, string $answer, array $dependencies, array $citations): bool
     {
         $turn->forceFill([
             'answer' => $answer,
@@ -100,8 +114,8 @@ final class Conversations
             'updated_at' => now(),
         ]);
 
-        SidebarTurn::query()->whereKey($turn->getKey())->where('active_slot', 1)
-            ->where('expires_at', '>', now())->update($turn->getDirty());
+        return SidebarTurn::query()->whereKey($turn->getKey())->where('active_slot', 1)
+            ->where('expires_at', '>', now())->update($turn->getDirty()) === 1;
     }
 
     public function fail(SidebarTurn $turn, string $code): void
@@ -125,18 +139,36 @@ final class Conversations
             }
 
             $session->turns()->delete();
-            $session->update(['public_id' => (string) Str::uuid()]);
+            MemoryEntry::query()->where('session_id', $session->id)->whereIn('kind', ['short', 'context'])->delete();
+            $session->update([
+                'public_id' => (string) Str::uuid(),
+                'generation' => $session->generation + 1,
+                'memory_pending' => 0, 'memory_processed' => 0, 'short_through' => 0, 'short_rebuild' => false, 'memory_permit' => null,
+            ]);
         }, attempts: 5);
     }
 
     public function forgetActor(Authenticatable $actor): void
     {
-        SidebarSession::query()->where('actor_key', Subject::keyFor($actor))->delete();
+        $this->forget('actor_key', Subject::keyFor($actor));
     }
 
     public function forgetScope(string $scope): void
     {
-        SidebarSession::query()->where('scope_key', hash('sha256', $scope))->delete();
+        $this->forget('scope_key', hash('sha256', $scope));
+    }
+
+    private function forget(string $column, string $key): void
+    {
+        DB::transaction(function () use ($column, $key): void {
+            $sessions = SidebarSession::query()->where($column, $key);
+            $sessions->increment('write_version');
+
+            $files = MemoryEntry::query()
+                ->whereIn('session_id', (clone $sessions)->select('id'))->whereNotNull('file_id')->select('file_id');
+            DB::table('agent_sidebar_wiki_files')->whereIn('id', $files)->update(['status' => 'delete', 'updated_at' => now()]);
+            $sessions->delete();
+        }, attempts: 5);
     }
 
     /** @return Builder<SidebarSession> */
