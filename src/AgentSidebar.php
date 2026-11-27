@@ -9,6 +9,10 @@ use Illuminate\Support\Facades\Route;
 
 final class AgentSidebar
 {
+    private const ROUTE_PREFIX = 'agent-sidebar/v1';
+
+    private const ROUTE_NAME_PREFIX = 'agent-sidebar.';
+
     public static function configure(): SidebarConfiguration
     {
         return new SidebarConfiguration;
@@ -19,13 +23,19 @@ final class AgentSidebar
         return new SidebarAccess($request);
     }
 
-    public static function routes(string $prefix = 'agent-sidebar/v1', string $name = 'agent-sidebar.'): void
+    public static function routes(string $prefix = self::ROUTE_PREFIX, string $name = self::ROUTE_NAME_PREFIX): void
     {
-        Route::middleware([PrivateJson::class, 'web', 'auth'])->prefix($prefix)->name($name)->group(function (): void {
-            Route::get('session', [SidebarController::class, 'show'])->name('session.show');
-            Route::post('session/turns', [SidebarController::class, 'store'])->name('turns.store');
-            Route::get('session/turns/{clientMessageId}', [SidebarController::class, 'turn'])->whereUuid('clientMessageId')->name('turns.show');
-            Route::delete('session/{sessionId}', [SidebarController::class, 'destroy'])->whereUuid('sessionId')->name('session.destroy');
-        });
+        $prefix = trim(trim($prefix), '/');
+        $name = trim($name);
+
+        Route::middleware([PrivateJson::class, 'web', 'auth'])
+            ->prefix($prefix === '' ? self::ROUTE_PREFIX : $prefix)
+            ->name($name === '' ? self::ROUTE_NAME_PREFIX : $name)
+            ->group(function (): void {
+                Route::get('session', [SidebarController::class, 'show'])->name('session.show');
+                Route::post('session/turns', [SidebarController::class, 'store'])->name('turns.store');
+                Route::get('session/turns/{clientMessageId}', [SidebarController::class, 'turn'])->whereUuid('clientMessageId')->name('turns.show');
+                Route::delete('session/{sessionId}', [SidebarController::class, 'destroy'])->whereUuid('sessionId')->name('session.destroy');
+            });
     }
 }

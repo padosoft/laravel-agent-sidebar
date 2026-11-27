@@ -35,6 +35,7 @@ use Padosoft\AgentSidebar\SidebarAgent;
 use Padosoft\AgentSidebar\Subject;
 use Padosoft\AgentSidebar\TurnRunner;
 use Padosoft\AgentSidebar\TurnStopped;
+use PHPUnit\Framework\Attributes\DataProvider;
 use PHPUnit\Framework\Attributes\Group;
 use Throwable;
 
@@ -129,6 +130,33 @@ final class SidebarTest extends TestCase
 
         config(['agent-sidebar.pages' => []]);
         $this->get('/blade-orders')->assertOk()->assertDontSee('data-agent-sidebar', false);
+    }
+
+    #[DataProvider('emptyRoutePrefixes')]
+    public function test_empty_route_prefixes_do_not_overwrite_application_routes(string $prefix): void
+    {
+        Route::prefix('admin')->name('admin.')->group(function () use ($prefix): void {
+            Route::get('session', fn () => response()->json(['from' => 'application']))->name('session.show');
+            AgentSidebar::routes(prefix: $prefix, name: '');
+        });
+
+        $this->signIn();
+        config(['agent-sidebar.host' => ApplicationHost::class]);
+
+        $this->getJson('/admin/session')->assertOk()->assertExactJson(['from' => 'application']);
+        self::assertSame('/admin/session', route('admin.session.show', absolute: false));
+
+        $sidebarUrl = route('admin.agent-sidebar.session.show', absolute: false);
+        self::assertSame('/admin/agent-sidebar/v1/session', $sidebarUrl);
+        $this->getJson($sidebarUrl)->assertOk()->assertJsonPath('turns', []);
+    }
+
+    public static function emptyRoutePrefixes(): array
+    {
+        return [
+            'empty' => [''],
+            'root slash' => ['/'],
+        ];
     }
 
     public function test_it_replays_an_invocation_without_running_ai_twice_and_rejects_a_changed_message(): void

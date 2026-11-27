@@ -136,7 +136,7 @@ Il POST esegue il turno in modo sincrono. Se la pagina si chiude durante l’att
 
 ## Le tabelle
 
-Il pacchetto usa il database Laravel del sito e usa le [tabelle della conversazione](database/migrations/2026_11_23_000001_create_agent_sidebar_tables.php) e quelle [della memoria](database/migrations/2026_11_24_000001_add_memory_to_agent_sidebar.php). Una sessione può contenere più turni.
+Il pacchetto usa il database Laravel del sito. Le quattro tabelle hanno il prefisso `agent_sidebar_`. Una sessione può contenere più turni. [Migrazione della conversazione](database/migrations/2026_11_23_000001_create_agent_sidebar_tables.php) · [Migrazione della memoria](database/migrations/2026_11_24_000001_add_memory_to_agent_sidebar.php)
 
 | Tabella | Una riga rappresenta | Colonne principali |
 | --- | --- | --- |
@@ -166,7 +166,9 @@ Il pacchetto usa il database Laravel del sito e usa le [tabelle della conversazi
 
 ### API della sidebar
 
-Prefisso di default **`/agent-sidebar/v1`**. Le rotte usano l’autenticazione web, risposte JSON private senza cache e protezione CSRF per gli invii e l’azzeramento.
+Le rotte usano il prefisso **`/agent-sidebar/v1`** negli URL e **`agent-sidebar.`** nei nomi. I valori vuoti e il percorso `/` ricadono sui prefissi del pacchetto. Per montare la sidebar in un’area dell’app, chiama `AgentSidebar::routes()` dentro un gruppo Laravel. Con `Route::prefix('admin')->name('admin.')`, per esempio, la sessione risponde su `/admin/agent-sidebar/v1/session` e il frontend usa il nome `admin.agent-sidebar.session.show` per generare il suo URL.
+
+Le rotte usano l’autenticazione web, risposte JSON private senza cache e protezione CSRF per gli invii e l’azzeramento.
 
 | Metodo | Percorso | Risultato |
 | --- | --- | --- |
